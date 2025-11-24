@@ -1,0 +1,11 @@
+hubini_cloud_backend/
+├─ sever.js          # main server file
+├─ package.json
+├─ .env              # environment variables
+├─ routes/           # API route files
+├─ controllers/      # route logic
+└─ models/           # DB models / queries
+
+to run server
+nodemon server.js
+
