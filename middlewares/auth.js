@@ -6,6 +6,13 @@ const { ERROR_CODES } = require('../config/constants');
 /**
  * Verify JWT token and attach user to request
  */
+
+
+
+
+
+
+
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;

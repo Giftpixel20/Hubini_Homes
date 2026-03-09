@@ -4,8 +4,8 @@ const WebSocket = require('ws');
 
 
 
-const CLOUD_ID = process.argv[2] || 'DEV_TEST_12345678';
-const SERVER_URL = process.env.WS_URL || 'ws://localhost:1000/ws';
+const CLOUD_ID = process.argv[2] || 'DEV_MKVI6RAJ_E2D14675';
+const SERVER_URL = process.env.WS_URL || 'wss://api.hubini.homes/ws';
 
 
 console.log("Simulator working");
