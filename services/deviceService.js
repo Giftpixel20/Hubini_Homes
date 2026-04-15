@@ -2,6 +2,35 @@ const { query } = require('../config/database');
 const { generateCloudId } = require('../utils/helpers');
 const { ERROR_CODES } = require('../config/constants');
 
+// Device must connect via WebSocket within this window or be auto-deleted
+const ACTIVATION_TIMEOUT_MS = 1000 * 1000; // 1000 seconds
+
+const activationTimers = new Map(); // deviceId -> timer handle
+
+const scheduleActivationCleanup = (deviceId) => {
+  cancelActivationTimer(deviceId);
+  const timer = setTimeout(async () => {
+    activationTimers.delete(deviceId);
+    try {
+      const rows = await query('SELECT is_online FROM devices WHERE id = ?', [deviceId]);
+      if (rows.length > 0 && !rows[0].is_online) {
+        await query('DELETE FROM devices WHERE id = ?', [deviceId]);
+        console.log(` Auto-deleted inactive device: id=${deviceId}`);
+      }
+    } catch (err) {
+      console.error('Device cleanup timer error:', err.message);
+    }
+  }, ACTIVATION_TIMEOUT_MS);
+  activationTimers.set(deviceId, timer);
+};
+
+const cancelActivationTimer = (deviceId) => {
+  if (activationTimers.has(deviceId)) {
+    clearTimeout(activationTimers.get(deviceId));
+    activationTimers.delete(deviceId);
+  }
+};
+
 /**
  * Register new device
  */
@@ -27,6 +56,9 @@ const registerDevice = async (userId, { Local_ID, Name, Type, Model, trigs }) =>
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [cloudId, userId, Local_ID, Name, Type, Model, trigs || null]
   );
+
+  // Start activation timer — device must connect via WS or it gets deleted
+  scheduleActivationCleanup(result.insertId);
 
   return {
     id: result.insertId,
@@ -139,6 +171,17 @@ const getDevice = async (userId, deviceId) => {
     createdAt: d.created_at,
     updatedAt: d.updated_at
   };
+};
+
+/**
+ * Get device by DB integer ID (used by WS mapping)
+ */
+const getDeviceById = async (deviceId) => {
+  const devices = await query(
+    'SELECT id, cloud_id, user_id, local_id, name, type, model, trigs, last_state, is_online FROM devices WHERE id = ?',
+    [deviceId]
+  );
+  return devices[0] || null;
 };
 
 /**
@@ -268,11 +311,14 @@ module.exports = {
   getUserDevices,
   getDevicesForClient,
   getDevice,
+  getDeviceById,
   getDeviceByCloudId,
   updateDevice,
   updateDeviceState,
   setDeviceOnline,
   deleteDevice,
   getDeviceForCommand,
-  logCommand
+  logCommand,
+  scheduleActivationCleanup,
+  cancelActivationTimer
 };

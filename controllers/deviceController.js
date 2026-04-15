@@ -129,12 +129,9 @@ const sendCommand = asyncHandler(async (req, res) => {
   // Log command
   await deviceService.logCommand(device.id, req.user.id, command);
 
-  // Send via WebSocket
+  // Send via WebSocket — appId '-' since this comes from HTTP, not a WS client session
   if (wsManager) {
-    const sent = wsManager.sendToDevice(device.cloud_id, {
-      type: 'command',
-      command
-    });
+    const sent = wsManager.sendCommandToDevice(device.id, 'command', command);
 
     if (sent) {
       return response.success(res, {
@@ -160,12 +157,9 @@ const triggerDevice = asyncHandler(async (req, res) => {
   // Get device
   const device = await deviceService.getDeviceForCommand(req.user.id, parseInt(deviceId));
 
-  // Send via WebSocket
+  // Send via WebSocket — appId '-' since this comes from HTTP, not a WS client session
   if (wsManager) {
-    const sent = wsManager.sendToDevice(device.cloud_id, {
-      type: 'command',
-      command: trigger
-    });
+    const sent = wsManager.sendCommandToDevice(device.id, 'trigger', trigger);
 
     if (sent) {
       return response.success(res, {

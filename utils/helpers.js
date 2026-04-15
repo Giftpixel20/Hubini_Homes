@@ -1,6 +1,12 @@
 const crypto = require('crypto');
 
 /**
+ * Generate short app session ID (max 20 chars)
+ * Assigned to every WS connection on connect.
+ */
+const generateAppId = () => crypto.randomBytes(10).toString('hex');
+
+/**
  * Generate unique cloud ID for devices/hubs
  */
 const generateCloudId = (prefix = 'DEV') => {
@@ -45,6 +51,7 @@ const parsePagination = (query) => {
 };
 
 module.exports = {
+  generateAppId,
   generateCloudId,
   generateToken,
   getClientIP,

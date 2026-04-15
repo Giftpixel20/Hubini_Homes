@@ -2,6 +2,35 @@ const { query } = require('../config/database');
 const { generateCloudId } = require('../utils/helpers');
 const { ERROR_CODES } = require('../config/constants');
 
+// Hub must connect via WebSocket within this window or be auto-deleted
+const ACTIVATION_TIMEOUT_MS = 1000 * 1000; // 1000 seconds
+
+const activationTimers = new Map(); // hubId -> timer handle
+
+const scheduleActivationCleanup = (hubId) => {
+  cancelActivationTimer(hubId);
+  const timer = setTimeout(async () => {
+    activationTimers.delete(hubId);
+    try {
+      const rows = await query('SELECT is_online FROM hubs WHERE id = ?', [hubId]);
+      if (rows.length > 0 && !rows[0].is_online) {
+        await query('DELETE FROM hubs WHERE id = ?', [hubId]);
+        console.log(` Auto-deleted inactive hub: id=${hubId}`);
+      }
+    } catch (err) {
+      console.error('Hub cleanup timer error:', err.message);
+    }
+  }, ACTIVATION_TIMEOUT_MS);
+  activationTimers.set(hubId, timer);
+};
+
+const cancelActivationTimer = (hubId) => {
+  if (activationTimers.has(hubId)) {
+    clearTimeout(activationTimers.get(hubId));
+    activationTimers.delete(hubId);
+  }
+};
+
 /**
  * Register new hub
  */
@@ -28,7 +57,11 @@ const registerHub = async (userId, { hubToken, hubName, type, model }) => {
     [cloudId, userId, hubToken, hubName, type, model]
   );
 
+  // Start activation timer — hub must connect via WS or it gets deleted
+  scheduleActivationCleanup(result.insertId);
+
   return {
+    id: result.insertId,
     your_cloudID: cloudId
   };
 };
@@ -100,6 +133,17 @@ const getHub = async (userId, hubId) => {
     createdAt: h.created_at,
     updatedAt: h.updated_at
   };
+};
+
+/**
+ * Get hub by DB integer ID (used by WS mapping)
+ */
+const getHubById = async (hubId) => {
+  const hubs = await query(
+    'SELECT id, cloud_id, user_id, hub_token, hub_name, type, model, is_online FROM hubs WHERE id = ?',
+    [hubId]
+  );
+  return hubs[0] || null;
 };
 
 /**
@@ -288,11 +332,14 @@ module.exports = {
   registerHub,
   getUserHubs,
   getHub,
+  getHubById,
   getHubByCloudId,
   updateHub,
   setHubOnline,
   deleteHub,
   getHubDevices,
   linkDevice,
-  unlinkDevice
+  unlinkDevice,
+  scheduleActivationCleanup,
+  cancelActivationTimer
 };
