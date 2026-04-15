@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Hubini WebSocket Flow</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      font-size: 14px;
+      color: #1a1a1a;
+      background: #fff;
+      padding: 60px 80px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .download-btn {
+      display: inline-block;
+      margin-bottom: 40px;
+      padding: 10px 20px;
+      background: #1a1a1a;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      letter-spacing: 0.3px;
+    }
+
+    .download-btn:hover {
+      background: #333;
+    }
+
+    @media print {
+      .download-btn { display: none; }
+    }
+
+    .section {
+      margin-bottom: 36px;
+    }
+
+    .step-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    .step-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    p {
+      line-height: 1.7;
+      color: #333;
+      margin-bottom: 10px;
+    }
+
+    .code-block {
+      background: #f5f5f5;
+      border-left: 3px solid #333;
+      padding: 12px 16px;
+      font-family: 'Courier New', monospace;
+      font-size: 12.5px;
+      line-height: 1.8;
+      margin: 12px 0;
+      white-space: pre;
+    }
+
+    .note {
+      background: #fffbe6;
+      border-left: 3px solid #f0c040;
+      padding: 10px 14px;
+      font-size: 13px;
+      margin-top: 10px;
+      line-height: 1.6;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid #e0e0e0;
+      margin: 36px 0;
+    }
+
+    .summary-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+
+    .summary-table th {
+      background: #f0f0f0;
+      text-align: left;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    .summary-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid #ebebeb;
+      font-size: 13px;
+      vertical-align: top;
+    }
+
+    .summary-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .tag {
+      display: inline-block;
+      background: #1a1a1a;
+      color: #fff;
+      font-size: 11px;
+      font-family: 'Courier New', monospace;
+      padding: 2px 8px;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Hubini — WebSocket Connection Flow</h1>
+  <br />
+  <button class="download-btn" onclick="window.print()">Download as PDF</button>
+
+  <hr class="divider" />
+
+  <!-- STEP 1 -->
+  <div class="section">
+    <div class="step-label">Step 1</div>
+    <div class="step-title">Device Opens a Connection</div>
+    <p>
+      The device connects to the server over WebSocket at the address below.
+      No data is sent yet — just the connection itself.
+    </p>
+    <div class="code-block">wss://hubini-homes.onrender.com/ws</div>
+    <p>
+      As soon as the connection is made, the server assigns it a temporary unique ID
+      (a UUID) so it can track this socket even before the device has identified itself.
+    </p>
+    <div class="note">
+      The server also sends back a welcome message right away:<br />
+      <strong>{ type: "connected", message: "Connected to Hubini WebSocket. Please authenticate." }</strong>
+    </div>
+  </div>
+
+  <hr class="divider" />
+
+  <!-- STEP 2 -->
+  <div class="section">
+    <div class="step-label">Step 2</div>
+    <div class="step-title">Device Identifies Itself</div>
+    <p>
+      After connecting, the device must immediately send its Cloud ID to the server
+      so the server knows which device this socket belongs to.
+    </p>
+    <p>The message format is a plain string — not JSON:</p>
+    <div class="code-block">MeWs|DEV_XXXXXXXXXXXXXXXXXX</div>
+    <p>
+      The part before the pipe (<span class="tag">|</span>) is always <strong>MeWs</strong>.
+      The part after is the device's Cloud ID, which starts with <strong>DEV_</strong>.
+    </p>
+    <p>Once the server receives this, it maps the socket to that Cloud ID and marks the device as online in the database.</p>
+    <p>The server responds with:</p>
+    <div class="code-block">{ "type": "registered", "cloudId": "DEV_XXXXXXXXXXXXXXXXXX" }</div>
+  </div>
+
+  <hr class="divider" />
+
+  <!-- STEP 3 -->
+  <div class="section">
+    <div class="step-label">Step 3</div>
+    <div class="step-title">Server Can Now Send Commands</div>
+    <p>
+      Once the device is registered, the server can push commands to it at any time.
+      Commands come in this format:
+    </p>
+    <div class="code-block">{ "type": "command", "command": "ON" }</div>
+    <p>
+      The <strong>command</strong> value is whatever was set up when the device was registered
+      (stored in the <strong>Trigs</strong> field). The device should read this field and act on it.
+    </p>
+  </div>
+
+  <hr class="divider" />
+
+  <!-- STEP 4 -->
+  <div class="section">
+    <div class="step-label">Step 4</div>
+    <div class="step-title">Device Reports a State Change (Optional)</div>
+    <p>
+      If the device needs to report its current state back to the server (e.g. a sensor reading,
+      or confirming a command was executed), it sends:
+    </p>
+    <div class="code-block">{ "type": "device_state", "cloudId": "DEV_XXXXXXXXXXXXXXXXXX", "state": "ON" }</div>
+    <p>
+      The server will update the database and notify the owner's app in real time.
+    </p>
+  </div>
+
+  <hr class="divider" />
+
+  <!-- STEP 5 -->
+  <div class="section">
+    <div class="step-label">Step 5</div>
+    <div class="step-title">Keeping the Connection Alive</div>
+    <p>
+      The server pings every connected socket every 30 seconds.
+      The WebSocket library handles the pong response automatically —
+      the device firmware doesn't need to do anything special for this.
+    </p>
+    <p>
+      If a device doesn't respond to the ping, the server will close the connection
+      and mark the device as offline.
+    </p>
+    <div class="note">
+      If the device wants to send its own heartbeat, it can send:<br />
+      <strong>{ type: "heartbeat" }</strong> — the server will respond with <strong>{ type: "heartbeat_ack" }</strong>
+    </div>
+  </div>
+
+  <hr class="divider" />
+
+  <!-- SUMMARY -->
+  <div class="section">
+    <div class="step-label">Summary</div>
+    <div class="step-title">Message Reference</div>
+
+    <table class="summary-table">
+      <thead>
+        <tr>
+          <th>Direction</th>
+          <th>Message</th>
+          <th>When</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Device → Server</td>
+          <td><span class="tag">MeWs|DEV_XXX</span></td>
+          <td>Right after connecting. Identifies the device.</td>
+        </tr>
+        <tr>
+          <td>Server → Device</td>
+          <td><span class="tag">{ type: "registered" }</span></td>
+          <td>Confirms the device is recognized.</td>
+        </tr>
+        <tr>
+          <td>Server → Device</td>
+          <td><span class="tag">{ type: "command" }</span></td>
+          <td>Sent when a user triggers the device from the app.</td>
+        </tr>
+        <tr>
+          <td>Device → Server</td>
+          <td><span class="tag">{ type: "device_state" }</span></td>
+          <td>Device reports its current state.</td>
+        </tr>
+        <tr>
+          <td>Device → Server</td>
+          <td><span class="tag">{ type: "heartbeat" }</span></td>
+          <td>Optional. Keeps the connection alive manually.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+</body>
+</html>

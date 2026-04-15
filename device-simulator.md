@@ -5,7 +5,7 @@ const WebSocket = require('ws');
 
 
 const CLOUD_ID = process.argv[2] || 'DEV_MKVI6RAJ_E2D14675';
-const SERVER_URL = process.env.WS_URL || 'wss://api.hubini.homes/ws';
+const SERVER_URL = process.env.WS_URL || 'wss://hubini-homes.onrender.com/ws'
 
 
 console.log("Simulator working");
@@ -24,7 +24,6 @@ function connect() {
     console.log(' Connected to WebSocket server');
     reconnectAttempts = 0;
 
-    // Register device using protocol format
     console.log(` Registering device: MeWs|${CLOUD_ID}`);
     ws.send(`MeWs|${CLOUD_ID}`);
   });
@@ -68,7 +67,6 @@ function connect() {
   });
 }
 
-// Send state update to server
 function sendStateUpdate(state) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     const message = JSON.stringify({
