@@ -4,18 +4,18 @@ const crypto = require('crypto');
 const deviceService = require('../services/deviceService');
 const hubService = require('../services/hubService');
 
-// Short app ID — max 20 chars (10 random bytes → 20 hex chars)
-const generateAppId = () => crypto.randomBytes(10).toString('hex');
+const generateAppId = () => crypto.randomBytes(10).toString('hex'); // 20 hex chars
 
 class WebSocketManager {
   constructor() {
     this.wss = null;
-    this.clients = new Map();       // userId -> Set<ws>  (authenticated app connections)
-    this.appConnections = new Map(); // appId  -> ws       (all connections, auth or not)
+    this.clients = new Map();        // userId  -> Set<ws>
+    this.appConnections = new Map(); // appId   -> ws
     this.devices = new Map();        // dbId (string) -> ws
     this.hubs = new Map();           // dbId (string) -> ws
     this.deviceMeta = new Map();     // dbId -> { cloudId, userId, userPlan, devPlan }
     this.hubMeta = new Map();        // dbId -> { cloudId, userId }
+    this.pendingPongs = new Map();   // dbId (string) -> Array<{ cmd, data }>
   }
 
   // ─────────────────────────────────────────────
@@ -41,9 +41,6 @@ class WebSocketManager {
 
     this.appConnections.set(ws.appId, ws);
 
-    // Tell the client its appID — no JSON
-    this.send(ws, `connected|${ws.appId}`);
-
     ws.on('message', (data) => this.handleMessage(ws, data.toString().trim()));
     ws.on('close', () => this.handleDisconnect(ws));
     ws.on('error', (err) => console.error('WebSocket error:', err.message));
@@ -59,17 +56,14 @@ class WebSocketManager {
       const cmd = parts[0].toLowerCase();
 
       switch (cmd) {
-        case 'mews': return this.handleDeviceMapping(ws, parts);  // device registration
-        case 'mewh': return this.handleHubMapping(ws, parts);     // hub registration
-        case 'auth': return this.handleAuth(ws, parts);
+        case 'mews':  return this.handleDeviceMapping(ws, parts);
+        case 'mewh':  return this.handleHubMapping(ws, parts);
+        case 'auth':  return this.handleAuth(ws, parts);
         case 'getds': return this.handleGetDevices(ws);
-        case 'trigger': return this.handleTrigger(ws, parts);
-        case 'ping': return this.handleDevicePing(ws);
+        case 'c_nd':  return this.handleClientCommand(ws, parts);  // app → cloud → device
+        case 'r_nd':  return this.handleNodeResponse(ws, parts);   // device → cloud → app
+        case 'ping':  return this.handleDevicePing(ws);
         default:
-          // Device sending a response back: <cmd>|<devToken>|<appId>|<data...>
-          if (ws.connectionType === 'device') {
-            return this.handleDeviceResponse(ws, cmd, parts);
-          }
           this.send(ws, `error|Unknown command: ${cmd}`);
       }
     } catch (err) {
@@ -80,6 +74,8 @@ class WebSocketManager {
 
   // ─────────────────────────────────────────────
   // DEVICE MAPPING  —  mews|<dbId>
+  // Response: registered|<dbId>|<userPlan>|<devPlan>
+  // Device stores the plans at connection time — not repeated in every command
   // ─────────────────────────────────────────────
 
   async handleDeviceMapping(ws, parts) {
@@ -98,21 +94,24 @@ class WebSocketManager {
       ws.cloudId = device.cloud_id;
       ws.connectionType = 'device';
 
+      const userPlan = 'free'; // extend when plan field added to users table
+      const devPlan = 'free';
+
       this.devices.set(String(dbId), ws);
       this.deviceMeta.set(String(dbId), {
         cloudId: device.cloud_id,
         userId: device.user_id,
-        userPlan: 'free',   // extend when plan field added to users table
-        devPlan: 'free'
+        userPlan,
+        devPlan
       });
 
-      // Cancel the activation-cleanup timer started at registration
       deviceService.cancelActivationTimer(parseInt(dbId));
-
       await deviceService.setDeviceOnline(device.cloud_id, true);
 
       console.log(` Device mapped: dbId=${dbId}, cloud_id=${device.cloud_id}`);
-      this.send(ws, `registered|${dbId}`);
+
+      // Plans sent once here — device stores them, no need to repeat in every relay
+      this.send(ws, `registered|${dbId}|${userPlan}|${devPlan}`);
     } catch (err) {
       console.error('Device mapping error:', err.message);
       this.send(ws, 'error|Mapping failed');
@@ -121,6 +120,7 @@ class WebSocketManager {
 
   // ─────────────────────────────────────────────
   // HUB MAPPING  —  mewh|<dbId>
+  // Response: registered|<dbId>|<userPlan>|<devPlan>
   // ─────────────────────────────────────────────
 
   async handleHubMapping(ws, parts) {
@@ -139,6 +139,9 @@ class WebSocketManager {
       ws.cloudId = hub.cloud_id;
       ws.connectionType = 'hub';
 
+      const userPlan = 'free';
+      const devPlan = 'free';
+
       this.hubs.set(String(dbId), ws);
       this.hubMeta.set(String(dbId), {
         cloudId: hub.cloud_id,
@@ -146,11 +149,10 @@ class WebSocketManager {
       });
 
       hubService.cancelActivationTimer(parseInt(dbId));
-
       await hubService.setHubOnline(hub.cloud_id, true);
 
       console.log(` Hub mapped: dbId=${dbId}, cloud_id=${hub.cloud_id}`);
-      this.send(ws, `registered|${dbId}`);
+      this.send(ws, `registered|${dbId}|${userPlan}|${devPlan}`);
     } catch (err) {
       console.error('Hub mapping error:', err.message);
       this.send(ws, 'error|Mapping failed');
@@ -180,7 +182,8 @@ class WebSocketManager {
       this.clients.get(decoded.userId).add(ws);
 
       console.log(` Client authenticated: userId=${decoded.userId}, appId=${ws.appId}`);
-      this.send(ws, 'auth_success');
+      // App receives its assigned appId — used in all subsequent c_nd commands
+      this.send(ws, `auth|${ws.appId}`);
     } catch (err) {
       this.send(ws, 'error|Invalid token');
     }
@@ -188,7 +191,7 @@ class WebSocketManager {
 
   // ─────────────────────────────────────────────
   // GET DEVICES  —  getds
-  // Response format:  ds|<id>:<localId>:<name>:<type>:<state>:<trigs>|...
+  // Response: ds|<id>:<localId>:<name>:<type>:<state>:<trigs>|...
   // ─────────────────────────────────────────────
 
   async handleGetDevices(ws) {
@@ -215,110 +218,130 @@ class WebSocketManager {
   }
 
   // ─────────────────────────────────────────────
-  // TRIGGER / RELAY  —  trigger|<dbDeviceId>|<cmd>|<args...>
+  // APP → CLOUD → DEVICE  —  c_nd|<dbId>|<appId>|<todo>|<args...>
   //
-  // Relay to device:
-  //   <cmd>|<devToken>|<appId>|<userPlan>|<devPlan>|<args>
+  // Cloud relays to device as:
+  //   c_nd|<cloudId>|<appId>|<todo>|<args>
+  //
+  // No plan fields in relay — device already has them from mews handshake
   // ─────────────────────────────────────────────
 
-  async handleTrigger(ws, parts) {
+  async handleClientCommand(ws, parts) {
     if (!ws.authenticated || !ws.userId) {
       return this.send(ws, 'error|Not authenticated');
     }
 
     const dbDeviceId = parts[1];
-    const cmd = parts[2];
-    const args = parts.slice(3).join('|');
+    const appId      = parts[2] || ws.appId;
+    const todo       = parts[3];
+    const args       = parts.slice(4).join('|');
 
-    if (!dbDeviceId || !cmd) {
-      return this.send(ws, 'error|Device ID and command required');
+    if (!dbDeviceId || !todo) {
+      return this.send(ws, 'error|Device ID and todo required');
     }
 
     try {
-      const device = await deviceService.getDeviceForCommand(ws.userId, parseInt(dbDeviceId));
-      const meta = this.deviceMeta.get(String(dbDeviceId));
-      const targetWs = this.devices.get(String(dbDeviceId));
+      const device    = await deviceService.getDeviceForCommand(ws.userId, parseInt(dbDeviceId));
+      const meta      = this.deviceMeta.get(String(dbDeviceId));
+      const targetWs  = this.devices.get(String(dbDeviceId));
 
       if (!targetWs || targetWs.readyState !== 1) {
         return this.send(ws, 'error|Device offline');
       }
 
-      // Build relay message — appId spot uses ws.appId (the sending client's appId)
-      const userPlan = meta?.userPlan || 'free';
-      const devPlan = meta?.devPlan || 'free';
       const devToken = meta?.cloudId || String(dbDeviceId);
 
+      // Relay to device
       const relay = args
-        ? `${cmd}|${devToken}|${ws.appId}|${userPlan}|${devPlan}|${args}`
-        : `${cmd}|${devToken}|${ws.appId}|${userPlan}|${devPlan}`;
+        ? `c_nd|${devToken}|${appId}|${todo}|${args}`
+        : `c_nd|${devToken}|${appId}|${todo}`;
 
       this.send(targetWs, relay);
-
-      await deviceService.logCommand(device.id, ws.userId, cmd);
+      await deviceService.logCommand(device.id, ws.userId, todo);
     } catch (err) {
-      this.send(ws, `error|${err.message || 'Failed to trigger device'}`);
+      this.send(ws, `error|${err.message || 'Failed to send command'}`);
     }
   }
 
   // ─────────────────────────────────────────────
-  // DEVICE PING  —  ping  (device → cloud every 30 s)
+  // DEVICE → CLOUD → APP  —  r_nd|<cloudId>|<appId>|<respTodo>|<args>|<stateName>
+  //
+  // Cloud updates DB then forwards full response to the originating app.
+  // If appId is '-' → no app to notify, just update DB and broadcast state to user.
+  // ─────────────────────────────────────────────
+
+  async handleNodeResponse(ws, parts) {
+    const devToken  = parts[1];
+    const appId     = parts[2];
+    const respTodo  = parts[3];
+    const stateData = parts.slice(4).join('|'); // everything after respTodo
+
+    // Best-effort DB state update
+    if (ws.dbId) {
+      try {
+        await deviceService.updateDeviceState(parseInt(ws.dbId), stateData);
+      } catch (err) { /* non-critical */ }
+    }
+
+    if (!appId || appId === '-') {
+      // Server-device only — notify the device owner's app connections of state change
+      const meta = ws.dbId ? this.deviceMeta.get(ws.dbId) : null;
+      if (meta) {
+        this.notifyUser(meta.userId, `r_nd|${devToken}|-|${respTodo}|${stateData}`);
+      }
+      return;
+    }
+
+    // Route full response back to the originating app session
+    const appWs = this.appConnections.get(appId);
+    if (appWs && appWs.readyState === 1) {
+      this.send(appWs, parts.join('|'));
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // DEVICE PING  —  ping  (device sends every 30 s)
+  //
+  // Updates last_seen. Only replies if the server has queued data for this
+  // device (plan change, booking, etc.). Silence = nothing pending.
+  // Reply format: pong|<devId>|<cmd>|<data>
   // ─────────────────────────────────────────────
 
   async handleDevicePing(ws) {
     if (ws.cloudId) {
       try {
-        await deviceService.setDeviceOnline(ws.cloudId, true); // refreshes last_seen
-      } catch (err) { /* non-critical */ }
-    }
-    this.send(ws, 'pong');
-  }
-
-  // ─────────────────────────────────────────────
-  // DEVICE RESPONSE  —  <cmd>|<devToken>|<appId>|<data...>
-  //
-  // If appId == '-'  →  server-device only, no relay
-  // Otherwise        →  relay back to the originating app
-  //   App receives:  <cmd>|<appId>|<data>
-  // ─────────────────────────────────────────────
-
-  async handleDeviceResponse(ws, cmd, parts) {
-    const devToken = parts[1];
-    const appId = parts[2];
-    const data = parts.slice(3).join('|');
-
-    // Internal server-device message (appId blank)
-    if (!appId || appId === '-') {
-      await this._handleInternalDeviceMessage(ws, cmd, data);
-      return;
-    }
-
-    // Update device state in DB with response data (best-effort)
-    if (ws.dbId) {
-      try {
-        await deviceService.updateDeviceState(parseInt(ws.dbId), data);
+        await deviceService.setDeviceOnline(ws.cloudId, true);
       } catch (err) { /* non-critical */ }
     }
 
-    // Relay to originating app — restructure: <cmd>|<appId>|<data>
-    const appWs = this.appConnections.get(appId);
-    if (appWs && appWs.readyState === 1) {
-      this.send(appWs, `${cmd}|${appId}|${data}`);
+    const dbId = ws.dbId;
+    if (!dbId) return;
+
+    const queue = this.pendingPongs.get(dbId);
+    if (!queue || queue.length === 0) return;
+
+    // Drain the queue — send each pending pong then clear
+    const meta = this.deviceMeta.get(dbId);
+    const devId = meta?.cloudId || dbId;
+
+    for (const { cmd, data } of queue) {
+      this.send(ws, `pong|${devId}|${cmd}|${data}`);
     }
+    this.pendingPongs.delete(dbId);
   }
 
-  async _handleInternalDeviceMessage(ws, cmd, data) {
-    if (!ws.dbId) return;
+  // ─────────────────────────────────────────────
+  // QUEUE A PONG  —  called externally when server needs to push data to a device
+  // e.g. plan change, booking queued while device was mid-cycle
+  // The data will be delivered on the device's next ping.
+  // ─────────────────────────────────────────────
 
-    try {
-      await deviceService.updateDeviceState(parseInt(ws.dbId), data);
-      const meta = this.deviceMeta.get(ws.dbId);
-      if (meta) {
-        // Notify all of the owner's app connections
-        this.notifyUser(meta.userId, `device_state|${ws.dbId}|${data}`);
-      }
-    } catch (err) {
-      console.error('Internal device message error:', err.message);
+  queuePong(dbId, cmd, data) {
+    const key = String(dbId);
+    if (!this.pendingPongs.has(key)) {
+      this.pendingPongs.set(key, []);
     }
+    this.pendingPongs.get(key).push({ cmd, data });
   }
 
   // ─────────────────────────────────────────────
@@ -361,21 +384,20 @@ class WebSocketManager {
   // ─────────────────────────────────────────────
 
   /**
-   * Send a command to a device from an HTTP request (no app WS session).
-   * Format: <cmd>|<devToken>|<appId '-'>|<userPlan>|<devPlan>|<args>
+   * Send a c_nd command to a device from an HTTP request (no app WS session).
+   * appId is always '-' since there's no WS client session to route a response to.
+   * Format: c_nd|<cloudId>|-|<todo>|<args>
    */
-  sendCommandToDevice(dbId, cmd, args = '') {
+  sendCommandToDevice(dbId, todo, args = '') {
     const ws = this.devices.get(String(dbId));
     if (!ws || ws.readyState !== 1) return false;
 
-    const meta = this.deviceMeta.get(String(dbId));
+    const meta     = this.deviceMeta.get(String(dbId));
     const devToken = meta?.cloudId || String(dbId);
-    const userPlan = meta?.userPlan || 'free';
-    const devPlan = meta?.devPlan || 'free';
 
     const message = args
-      ? `${cmd}|${devToken}|-|${userPlan}|${devPlan}|${args}`
-      : `${cmd}|${devToken}|-|${userPlan}|${devPlan}`;
+      ? `c_nd|${devToken}|-|${todo}|${args}`
+      : `c_nd|${devToken}|-|${todo}`;
 
     this.send(ws, message);
     return true;
